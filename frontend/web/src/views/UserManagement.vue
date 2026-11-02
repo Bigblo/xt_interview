@@ -7,6 +7,37 @@
       <el-button :icon="Refresh" @click="loadUsers">刷新</el-button>
     </div>
 
+    <div class="search-bar">
+      <el-input
+        v-model="searchForm.username"
+        placeholder="按用户名搜索"
+        clearable
+        style="width: 200px"
+        @keyup.enter="handleSearch"
+      />
+      <el-select
+        v-model="searchForm.status"
+        placeholder="状态"
+        clearable
+        style="width: 120px"
+      >
+        <el-option label="启用" :value="1" />
+        <el-option label="禁用" :value="0" />
+      </el-select>
+      <el-select
+        v-model="searchForm.roleLevel"
+        placeholder="权限级别"
+        clearable
+        style="width: 180px"
+      >
+        <el-option label="用户权限" :value="1" />
+        <el-option label="管理员权限" :value="2" />
+        <el-option label="超级管理员权限" :value="3" />
+      </el-select>
+      <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
+      <el-button :icon="RefreshLeft" @click="handleReset">重置</el-button>
+    </div>
+
     <el-table
       v-loading="loading"
       :data="users"
@@ -18,6 +49,11 @@
       <el-table-column prop="name" label="姓名" width="100" />
       <el-table-column prop="gender" label="性别" width="80" />
       <el-table-column prop="phone" label="联系方式" width="140" />
+      <el-table-column label="所属部门" width="130">
+        <template #default="{ row }">
+          {{ row.departmentName || '未分配' }}
+        </template>
+      </el-table-column>
       <el-table-column label="权限级别" width="120">
         <template #default="{ row }">
           <el-tag :type="roleTagType(row.roleLevel)">
@@ -45,6 +81,18 @@
       </el-table-column>
     </el-table>
 
+    <div class="pagination-bar">
+      <el-pagination
+        :current-page="pagination.page"
+        :page-size="pagination.size"
+        :total="pagination.total"
+        :page-sizes="[10, 20, 50, 100]"
+        layout="total, sizes, prev, pager, next, jumper"
+        @current-change="handlePageChange"
+        @size-change="handleSizeChange"
+      />
+    </div>
+
     <el-dialog
       v-model="dialogVisible"
       :title="isEdit ? '编辑用户' : '添加用户'"
@@ -71,6 +119,22 @@
         </el-form-item>
         <el-form-item label="联系方式" prop="phone">
           <el-input v-model="formData.phone" placeholder="请输入联系方式" />
+        </el-form-item>
+        <el-form-item label="所属部门" prop="departmentId">
+          <el-select
+            v-model="formData.departmentId"
+            placeholder="请选择所属部门（可不选）"
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="dept in departments"
+              :key="dept.id"
+              :label="dept.status === 1 ? dept.name : `${dept.name}（已禁用）`"
+              :value="dept.id"
+              :disabled="dept.status !== 1"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="密码" prop="password">
           <el-input
@@ -106,29 +170,62 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { accountApi } from '@/api'
+import { accountApi, departmentApi } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Edit, Delete, Refresh } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, Refresh, Search, RefreshLeft } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 
+/** 表格加载状态 */
 const loading = ref(false)
+/** 保存按钮 loading 状态 */
 const submitting = ref(false)
+/** 新增/编辑弹窗是否显示 */
 const dialogVisible = ref(false)
+/** 当前是否为编辑模式 */
 const isEdit = ref(false)
+/** 正在编辑的用户ID，新增时为 0 */
 const editId = ref<number>(0)
 
+/** 当前页的用户列表 */
 const users = ref<any[]>([])
+/** 部门下拉选项（用于“所属部门”选择与展示） */
+const departments = ref<any[]>([])
 
+/** 搜索条件 */
+const searchForm = reactive({
+  /** 用户名关键字（模糊匹配） */
+  username: '',
+  /** 状态：0-禁用，1-启用，undefined 表示不筛选 */
+  status: undefined as number | undefined,
+  /** 权限级别，undefined 表示不筛选 */
+  roleLevel: undefined as number | undefined
+})
+
+/** 分页状态：page 从 1 开始（传给后端时减 1） */
+const pagination = reactive({ page: 1, size: 10, total: 0 })
+
+/** 表单实例，用于校验与重置 */
 const formRef = ref<FormInstance>()
 
+/** 弹窗表单数据（新增/编辑共用） */
 const formData = reactive({
+  /** 登录用户名 */
   username: '',
+  /** 姓名 */
   name: '',
+  /** 性别 */
   gender: '男',
+  /** 联系方式 */
   phone: '',
+  /** 密码，编辑时留空表示不修改 */
   password: '',
+  /** 所属部门ID，null 表示未分配 */
+  departmentId: null as number | null,
+  /** 权限级别 */
   roleLevel: 1,
+  /** 状态：0-禁用，1-启用 */
   status: 1,
+  /** 是否超级管理员 */
   isSuper: 0
 })
 
@@ -153,10 +250,26 @@ function roleTagType(level: number): 'info' | 'warning' | 'danger' {
   return map[level] || 'info'
 }
 
+/** el-select 清空后可能得到空串，统一转成 undefined，避免后端类型转换失败 */
+function toNumberOrUndefined(value: unknown): number | undefined {
+  if (value === '' || value === null || value === undefined) return undefined
+  const num = Number(value)
+  return Number.isNaN(num) ? undefined : num
+}
+
+/** 按当前搜索条件与页码加载用户列表 */
 async function loadUsers() {
   loading.value = true
   try {
-    users.value = await accountApi.getAll()
+    const res: any = await accountApi.page({
+      username: searchForm.username.trim() || undefined,
+      status: toNumberOrUndefined(searchForm.status),
+      roleLevel: toNumberOrUndefined(searchForm.roleLevel),
+      page: pagination.page - 1,
+      size: pagination.size
+    })
+    users.value = res?.list || []
+    pagination.total = res?.totalElements || 0
   } catch (error: any) {
     ElMessage.error(error.message || '加载用户列表失败')
   } finally {
@@ -164,12 +277,51 @@ async function loadUsers() {
   }
 }
 
+/** 加载部门下拉数据 */
+async function loadDepartments() {
+  try {
+    departments.value = await departmentApi.getAll()
+  } catch (error: any) {
+    ElMessage.error(error.message || '加载部门列表失败')
+  }
+}
+
+/** 点击搜索：回到第一页后查询 */
+function handleSearch() {
+  pagination.page = 1
+  loadUsers()
+}
+
+/** 重置搜索条件并回到第一页 */
+function handleReset() {
+  searchForm.username = ''
+  searchForm.status = undefined
+  searchForm.roleLevel = undefined
+  pagination.page = 1
+  loadUsers()
+}
+
+/** 翻页：分页组件给的是 1 起的页码 */
+function handlePageChange(page: number) {
+  pagination.page = page
+  loadUsers()
+}
+
+/** 修改每页条数：回到第一页后重新查询 */
+function handleSizeChange(size: number) {
+  pagination.size = size
+  pagination.page = 1
+  loadUsers()
+}
+
+/** 重置表单为新增时的默认值 */
 function resetForm() {
   formData.username = ''
   formData.name = ''
   formData.gender = '男'
   formData.phone = ''
   formData.password = ''
+  formData.departmentId = null
   formData.roleLevel = 1
   formData.status = 1
   formData.isSuper = 0
@@ -178,11 +330,13 @@ function resetForm() {
   formRef.value?.resetFields()
 }
 
+/** 打开新增用户弹窗 */
 function openCreateDialog() {
   resetForm()
   dialogVisible.value = true
 }
 
+/** 打开编辑用户弹窗，回填当前行数据 */
 function openEditDialog(row: any) {
   resetForm()
   isEdit.value = true
@@ -191,12 +345,14 @@ function openEditDialog(row: any) {
   formData.name = row.name
   formData.gender = row.gender || '男'
   formData.phone = row.phone || ''
+  formData.departmentId = row.departmentId ?? null
   formData.roleLevel = row.roleLevel
   formData.status = row.status
   formData.isSuper = row.isSuper
   dialogVisible.value = true
 }
 
+/** 提交表单：编辑调用更新，否则调用新增；密码留空则不提交该字段 */
 async function handleSubmit() {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
@@ -204,9 +360,18 @@ async function handleSubmit() {
 
     submitting.value = true
     try {
-      const data = { ...formData }
-      if (data.password === '') {
-        delete data.password
+      const data: any = {
+        username: formData.username.trim(),
+        name: formData.name.trim(),
+        gender: formData.gender,
+        phone: formData.phone.trim(),
+        departmentId: formData.departmentId ?? null,
+        roleLevel: formData.roleLevel,
+        status: formData.status,
+        isSuper: formData.isSuper
+      }
+      if (formData.password !== '') {
+        data.password = formData.password
       }
 
       if (isEdit.value) {
@@ -226,6 +391,7 @@ async function handleSubmit() {
   })
 }
 
+/** 删除用户：二次确认后软删除，并处理当前页被删空的情况 */
 async function handleDelete(row: any) {
   try {
     await ElMessageBox.confirm(
@@ -239,6 +405,10 @@ async function handleDelete(row: any) {
     )
     await accountApi.delete(row.id)
     ElMessage.success('用户删除成功')
+    // 删除后若当前页已为空，回退一页
+    if (users.value.length === 1 && pagination.page > 1) {
+      pagination.page -= 1
+    }
     await loadUsers()
   } catch (error: any) {
     if (error !== 'cancel') {
@@ -248,6 +418,7 @@ async function handleDelete(row: any) {
 }
 
 onMounted(() => {
+  loadDepartments()
   loadUsers()
 })
 </script>
@@ -262,6 +433,19 @@ onMounted(() => {
 .page-header {
   display: flex;
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
+}
+
+.search-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.pagination-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 </style>

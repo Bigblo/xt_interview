@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
 
@@ -43,4 +43,15 @@ request.interceptors.response.use(
   }
 )
 
-export default request
+/**
+ * 响应拦截器已经把 response.data 直接返回，这里同步修正对外类型，
+ * 避免调用方拿到 AxiosResponse 而需要逐个 as any。
+ */
+interface ApiClient {
+  get<T = any>(url: string, config?: AxiosRequestConfig): Promise<T>
+  post<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T>
+  put<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T>
+  delete<T = any>(url: string, config?: AxiosRequestConfig): Promise<T>
+}
+
+export default request as unknown as ApiClient
